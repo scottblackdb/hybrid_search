@@ -17,6 +17,9 @@
 # MAGIC | `orders` | 8,000,000 | `patient_id`, `encounter_id` |
 # MAGIC | `order_details` | 20,000,000 | `patient_id`, `order_id`; `embedding` = `test_name` + `result_comment` |
 # MAGIC | `diagnoses` | 12,000,000 | `patient_id`, `encounter_id`; `embedding` = `diagnosis_description` + `clinical_note` |
+# MAGIC | `embedding_vectors` | distinct texts | lookup: `embedding` → 1024-dim GTE vector |
+# MAGIC
+# MAGIC Encounters, order_details, and diagnoses also get `embedding_vector ARRAY<FLOAT>` (1024-dim, `databricks-gte-large-en`).
 # MAGIC
 # MAGIC Run on **serverless** or a medium cluster. Expect ~10–20 minutes at full scale.
 
@@ -33,6 +36,8 @@ dbutils.widgets.text("n_encounters", "8000000")
 dbutils.widgets.text("n_orders", "8000000")
 dbutils.widgets.text("n_order_details", "20000000")
 dbutils.widgets.text("n_diagnoses", "12000000")
+dbutils.widgets.text("embedding_endpoint", "databricks-gte-large-en")
+dbutils.widgets.dropdown("generate_vectors", "true", ["true", "false"])
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -42,6 +47,8 @@ N_ORDERS = int(dbutils.widgets.get("n_orders"))
 N_DETAILS = int(dbutils.widgets.get("n_order_details"))
 N_DX = int(dbutils.widgets.get("n_diagnoses"))
 N_HIGH_UTIL = max(1, int(N_PATIENTS * 0.20))
+EMBEDDING_ENDPOINT = dbutils.widgets.get("embedding_endpoint")
+GENERATE_VECTORS = dbutils.widgets.get("generate_vectors") == "true"
 
 TARGET = f"{CATALOG}.{SCHEMA}"
 AS_OF = datetime(2026, 10, 21)
@@ -958,6 +965,70 @@ print(f"diagnoses: {spark.table(f'{TARGET}.diagnoses').count():,}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Embedding vectors (1024-dim GTE)
+# MAGIC
+# MAGIC `embedding` text → `embedding_vector ARRAY<FLOAT>` via `ai_query` on the `embedding_endpoint` widget
+# MAGIC (default `databricks-gte-large-en`). Source text is highly templated, so each distinct string is embedded
+# MAGIC once into `embedding_vectors` and joined back onto every row of encounters, order_details, and diagnoses.
+# MAGIC Set `generate_vectors = false` to skip for smoke tests.
+
+# COMMAND ----------
+
+# table -> CLUSTER BY keys (CREATE OR REPLACE resets clustering and properties, so restate them).
+EMBED_TABLES = {
+    "encounters": "patient_id, encounter_date",
+    "order_details": "patient_id, order_id",
+    "diagnoses": "patient_id, icd10_code",
+}
+
+if GENERATE_VECTORS:
+    distinct_text = "\n          UNION\n          ".join(f"SELECT embedding FROM {TARGET}.{t}" for t in EMBED_TABLES)
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {TARGET}.embedding_vectors
+        COMMENT 'Distinct embedding source text -> {EMBEDDING_ENDPOINT} vector (1024-dim).'
+        AS
+        SELECT
+          embedding,
+          CAST(r.result AS ARRAY<FLOAT>) AS embedding_vector,
+          r.errorMessage AS error_message
+        FROM (
+          SELECT embedding, ai_query('{EMBEDDING_ENDPOINT}', embedding, failOnError => false) AS r
+          FROM (
+          {distinct_text}
+          )
+          WHERE embedding IS NOT NULL
+        )
+        """
+    )
+    print(f"distinct texts embedded: {spark.table(f'{TARGET}.embedding_vectors').count():,}")
+
+    for table, cluster_cols in EMBED_TABLES.items():
+        # Drop a prior vector column so this cell can be re-run on its own.
+        except_clause = (
+            " EXCEPT (embedding_vector)" if "embedding_vector" in spark.table(f"{TARGET}.{table}").columns else ""
+        )
+        spark.sql(
+            f"""
+            CREATE OR REPLACE TABLE {TARGET}.{table}
+            CLUSTER BY ({cluster_cols})
+            TBLPROPERTIES (
+              'delta.enableChangeDataFeed' = 'true',
+              'quality' = 'bronze'
+            )
+            AS
+            SELECT t.*{except_clause}, v.embedding_vector
+            FROM {TARGET}.{table} t
+            LEFT JOIN {TARGET}.embedding_vectors v ON t.embedding = v.embedding
+            """
+        )
+        print(f"{table}: embedding_vector added")
+else:
+    print("generate_vectors = false; skipping embedding vectors")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Comments, demo view, and validation
 
 # COMMAND ----------
@@ -1074,5 +1145,23 @@ spark.sql(
     FROM {TARGET}.patients
     """
 ).show()
+
+if GENERATE_VECTORS:
+    print("embedding_vector coverage (expect rows_missing = 0, dim = 1024):")
+    spark.sql(
+        "\n    UNION ALL\n    ".join(
+            f"""SELECT '{t}' AS table_name,
+              COUNT(*) AS row_count,
+              SUM(CASE WHEN embedding_vector IS NULL THEN 1 ELSE 0 END) AS rows_missing,
+              MIN(size(embedding_vector)) AS min_dim,
+              MAX(size(embedding_vector)) AS max_dim
+            FROM {TARGET}.{t}"""
+            for t in EMBED_TABLES
+        )
+    ).show(truncate=False)
+    print("embedding endpoint errors (should be 0):")
+    spark.sql(
+        f"SELECT COUNT(*) AS errors FROM {TARGET}.embedding_vectors WHERE error_message IS NOT NULL OR embedding_vector IS NULL"
+    ).show()
 
 print("Done.")
