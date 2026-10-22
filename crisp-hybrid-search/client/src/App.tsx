@@ -35,12 +35,15 @@ export default function App() {
 
   const runSearch = useCallback(async () => {
     if (!query.trim()) return;
-    setSearching(true);
+    // Clear the previous search first so stale results, record and SQL are not shown while the new search runs.
+    setResponse(null);
+    setSelectedId(null);
+    setDetail(null);
+    setDetailError(null);
     setSearchError(null);
+    setSearching(true);
     try {
       setResponse(await search(query.trim(), mode, sources));
-      setSelectedId(null);
-      setDetail(null);
     } catch (err) {
       setSearchError((err as Error).message);
     } finally {

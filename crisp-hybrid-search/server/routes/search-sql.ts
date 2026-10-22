@@ -15,7 +15,10 @@ export interface BuiltQuery {
 }
 
 const RRF_K = 60;
-const CANDIDATES = 100;
+/** Every search returns at most this many results. */
+export const MAX_RESULTS = 200;
+// Each leg must gather at least MAX_RESULTS candidates or a hybrid search could not fill the page.
+const CANDIDATES = MAX_RESULTS;
 // Max keyword matches that get ranked (override with KEYWORD_MATCH_CAP). A common term ("diabetes") matches ~11% of the
 // table, so collecting N matches reads ~N/1.5 heap blocks (~0.18 ms each from Lakebase storage): 20000 took ~2 s.
 // Terms with fewer matches than the cap are ranked exactly; for more common terms the top results come from the first
@@ -198,7 +201,7 @@ ${select}`;
 /** Session settings applied (SET LOCAL) before the search so filtered HNSW scans still return enough rows. */
 export const SESSION_SETTINGS = [
   "SET LOCAL work_mem = '64MB'", // keeps the keyword bitmap exact instead of lossy
-  'SET LOCAL hnsw.ef_search = 200',
+  'SET LOCAL hnsw.ef_search = 200', // >= candidates per leg
   'SET LOCAL hnsw.iterative_scan = relaxed_order',
   // Default is 20000; a source filter that matches few nearest neighbours otherwise returns 0 rows.
   'SET LOCAL hnsw.max_scan_tuples = 100000',

@@ -2,7 +2,14 @@ import { WorkspaceClient } from '@databricks/sdk-experimental';
 import type { Application } from 'express';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { buildSearchQuery, DETAIL_SQL, RELATED_SQL, SESSION_SETTINGS, type SearchMode } from './search-sql';
+import {
+  buildSearchQuery,
+  DETAIL_SQL,
+  MAX_RESULTS,
+  RELATED_SQL,
+  SESSION_SETTINGS,
+  type SearchMode,
+} from './search-sql';
 
 interface AppKitWithLakebase {
   lakebase: {
@@ -19,7 +26,7 @@ const SOURCES = ['encounters', 'order_details', 'diagnoses', 'clinical_notes'] a
 const SearchBody = z.object({
   query: z.string().trim().min(1).max(500),
   mode: z.enum(['hybrid', 'keyword', 'semantic']).default('hybrid'),
-  limit: z.number().int().min(1).max(100).default(25),
+  limit: z.number().int().min(1).max(MAX_RESULTS).default(MAX_RESULTS),
   sources: z.array(z.enum(SOURCES)).default([]),
 });
 

@@ -1,3 +1,6 @@
+/** Maximum results per search; the server enforces the same cap. */
+export const RESULT_LIMIT = 200;
+
 export type SearchMode = 'hybrid' | 'keyword' | 'semantic';
 
 export const SOURCES = [
@@ -88,7 +91,7 @@ export function search(query: string, mode: SearchMode, sources: string[]) {
   return request<SearchResponse>('/api/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, mode, sources, limit: 25 }),
+    body: JSON.stringify({ query, mode, sources, limit: RESULT_LIMIT }),
   });
 }
 
