@@ -169,7 +169,18 @@ with pg_connect() as conn:
             "USING hnsw (embedding vector_cosine_ops)"
         )
         print("HNSW vector index created")
-    conn.execute(f"ANALYZE {PG_TABLE}")
+        # clinical_notes is sparse (~0.2% of rows have vectors). With a source filter the planner skips the big HNSW
+        # index and exact-sorts every note, detoasting each 4 KB vector (~18 s). A small partial index keeps it ANN.
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {name}_embedding_hnsw_notes_idx ON {PG_TABLE} "
+            "USING hnsw (embedding vector_cosine_ops) WHERE source_table = 'clinical_notes'"
+        )
+        print("partial HNSW index for clinical_notes created")
+    # After a bulk load: raise statistics on the search columns, then VACUUM so hint bits and the visibility map are
+    # set (otherwise the first searches pay for it) and ANALYZE with the higher targets.
+    for col in ("content_tsv", "full_name", "source_table", "facility"):
+        conn.execute(f"ALTER TABLE {PG_TABLE} ALTER COLUMN {col} SET STATISTICS 1000")
+    conn.execute(f"VACUUM (ANALYZE) {PG_TABLE}")
 
 # COMMAND ----------
 
