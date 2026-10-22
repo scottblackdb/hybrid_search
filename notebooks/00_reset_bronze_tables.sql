@@ -16,6 +16,7 @@ DROP VIEW IF EXISTS crisp.bronze.v_frederick_delayed_labs;
 -- COMMAND ----------
 
 DROP TABLE IF EXISTS crisp.bronze.embedding_vectors;
+DROP TABLE IF EXISTS crisp.bronze.clinical_notes;
 DROP TABLE IF EXISTS crisp.bronze.order_details;
 DROP TABLE IF EXISTS crisp.bronze.orders;
 DROP TABLE IF EXISTS crisp.bronze.diagnoses;

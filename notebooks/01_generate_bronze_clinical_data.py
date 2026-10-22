@@ -17,6 +17,7 @@
 # MAGIC | `orders` | 8,000,000 | `patient_id`, `encounter_id` |
 # MAGIC | `order_details` | 20,000,000 | `patient_id`, `order_id`; `embedding` = `test_name` + `result_comment` |
 # MAGIC | `diagnoses` | 12,000,000 | `patient_id`, `encounter_id`; `embedding` = `diagnosis_description` + `clinical_note` |
+# MAGIC | `clinical_notes` | 8,000,000 | `patient_id`, `encounter_id` (one per encounter); `embedding` = `note_text` |
 # MAGIC | `embedding_vectors` | distinct texts | lookup: `embedding` → 1024-dim GTE vector |
 # MAGIC
 # MAGIC Encounters, order_details, and diagnoses also get `embedding_vector ARRAY<FLOAT>` (1024-dim, `databricks-gte-large-en`).
@@ -38,6 +39,7 @@ dbutils.widgets.text("n_order_details", "20000000")
 dbutils.widgets.text("n_diagnoses", "12000000")
 dbutils.widgets.text("embedding_endpoint", "databricks-gte-large-en")
 dbutils.widgets.dropdown("generate_vectors", "true", ["true", "false"])
+dbutils.widgets.text("note_embedding_pct", "1")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -49,6 +51,10 @@ N_DX = int(dbutils.widgets.get("n_diagnoses"))
 N_HIGH_UTIL = max(1, int(N_PATIENTS * 0.20))
 EMBEDDING_ENDPOINT = dbutils.widgets.get("embedding_endpoint")
 GENERATE_VECTORS = dbutils.widgets.get("generate_vectors") == "true"
+# Percent of clinical_notes (0-100) that get an embedding_vector; notes are unique text, so each is one endpoint call.
+NOTE_EMBEDDING_PCT = float(dbutils.widgets.get("note_embedding_pct"))
+assert 0 <= NOTE_EMBEDDING_PCT <= 100, NOTE_EMBEDDING_PCT
+NOTE_SAMPLE_PREDICATE = f"pmod(hash(note_id, 'note-embed'), 10000) < {int(round(NOTE_EMBEDDING_PCT * 100))}"
 
 TARGET = f"{CATALOG}.{SCHEMA}"
 AS_OF = datetime(2026, 10, 21)
@@ -965,11 +971,389 @@ print(f"diagnoses: {spark.table(f'{TARGET}.diagnoses').count():,}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Clinical notes (one per encounter)
+# MAGIC
+# MAGIC Provider documentation for each encounter: chief complaint, HPI, vitals, exam, medical decision making
+# MAGIC (differential and workup), an assessment that explains why each encounter diagnosis was assigned, and a plan.
+# MAGIC Ties to `encounters` via `encounter_id` and to `patients` via `patient_id`. `embedding` = `note_text`.
+# MAGIC Notes are mostly unique text, so only `note_embedding_pct` percent of them get vectors (see embedding section).
+
+# COMMAND ----------
+
+# Why the provider assigned each ICD-10 code, and what they plan to do about it.
+DX_REASONING = [
+    ("E11.9", "HbA1c above goal without documented retinopathy, nephropathy, or neuropathy.",
+     "Continue metformin, reinforce diet and activity, repeat HbA1c in 3 months."),
+    ("E11.22", "Type 2 diabetes with persistently reduced eGFR and albuminuria, consistent with diabetic kidney disease.",
+     "Continue ACE inhibitor, consider SGLT2 inhibitor, monitor creatinine and urine microalbumin."),
+    ("E11.65", "Home and clinic glucose readings above target with elevated HbA1c indicating hyperglycemia.",
+     "Intensify therapy with basal insulin titration; refer to diabetes education."),
+    ("I10", "Office blood pressures above 130/80 on separate visits without an identified secondary cause.",
+     "Continue lisinopril, home blood pressure monitoring, and sodium restriction."),
+    ("I50.9", "Dyspnea, edema, and elevated BNP consistent with heart failure; ejection fraction not yet documented.",
+     "Start loop diuretic, daily weights, and obtain echocardiogram."),
+    ("I50.22", "Reduced ejection fraction on prior echocardiogram with ongoing chronic symptoms.",
+     "Continue guideline-directed therapy (beta-blocker, ARNI, SGLT2 inhibitor); cardiology follow-up."),
+    ("I25.10", "Coronary artery disease documented on prior catheterization.",
+     "Continue aspirin and high-intensity statin; cardiac rehabilitation as appropriate."),
+    ("N18.3", "eGFR persistently 30-59 for more than 3 months.",
+     "Avoid nephrotoxins, renally dose medications, and monitor BMP every 3-6 months."),
+    ("N18.4", "eGFR persistently 15-29 for more than 3 months.",
+     "Nephrology referral, discuss renal replacement planning, monitor potassium and phosphorus."),
+    ("J44.1", "Known COPD with dyspnea, sputum volume, and wheeze increased above baseline.",
+     "Systemic steroids and scheduled bronchodilators, consider antibiotics; pulmonology follow-up."),
+    ("J45.909", "Intermittent wheeze and cough responsive to bronchodilator without current exacerbation.",
+     "Continue rescue inhaler; review inhaler technique and triggers."),
+    ("E78.5", "Lipid panel with LDL above goal for cardiovascular risk.",
+     "Start or continue statin; repeat lipid panel in 6-12 weeks."),
+    ("F32.9", "Depressed mood and anhedonia for more than 2 weeks with elevated PHQ-9.",
+     "Discuss SSRI and counseling referral; safety screening negative."),
+    ("F41.1", "Excessive worry most days for more than 6 months with elevated GAD-7.",
+     "Offer CBT referral and consider SSRI."),
+    ("M54.5", "Mechanical low back pain without radicular or red-flag features.",
+     "NSAIDs as tolerated, stay active, physical therapy referral."),
+    ("M17.11", "Right knee pain with crepitus and joint-space narrowing on prior imaging.",
+     "Strengthening exercise, topical NSAID, consider intra-articular steroid injection."),
+    ("E66.9", "BMI above 30 contributing to metabolic and cardiovascular risk.",
+     "Nutrition counseling and discussion of pharmacotherapy options."),
+    ("G47.33", "Snoring, witnessed apneas, and daytime somnolence with prior sleep study confirming OSA.",
+     "Reinforce nightly CPAP adherence."),
+    ("N39.0", "Dysuria and frequency with urinalysis positive for leukocyte esterase and nitrite.",
+     "Empiric antibiotics pending urine culture."),
+    ("J18.9", "Fever, productive cough, focal crackles, and infiltrate on chest X-ray.",
+     "Empiric antibiotics for community-acquired pneumonia; reassess in 48-72 hours."),
+    ("A41.9", "Suspected infection with fever, tachycardia, and elevated lactate meeting sepsis criteria.",
+     "Blood cultures, broad-spectrum antibiotics, and IV fluids per sepsis bundle."),
+    ("I63.9", "Acute focal neurologic deficit with imaging consistent with ischemic stroke.",
+     "Stroke team consulted; antiplatelet therapy, neuro checks, and telemetry."),
+    ("G30.9", "Progressive memory loss with functional decline and supportive cognitive testing.",
+     "Continue cholinesterase inhibitor; caregiver support and home safety planning."),
+    ("K21.0", "Heartburn and regurgitation with esophagitis on prior endoscopy.",
+     "Continue proton pump inhibitor and lifestyle modification."),
+    ("K74.60", "Chronic liver disease with imaging features of cirrhosis and thrombocytopenia.",
+     "Hepatology follow-up, HCC surveillance ultrasound, and variceal screening."),
+    ("C34.90", "Biopsy-confirmed lung malignancy under active oncology care.",
+     "Coordinate with oncology on ongoing treatment and symptom management."),
+    ("C50.911", "History of right breast malignancy under oncology surveillance.",
+     "Continue oncology follow-up and surveillance imaging."),
+    ("Z00.00", "Routine preventive examination without abnormal findings.",
+     "Age-appropriate screenings and immunizations updated."),
+    ("Z23", "Patient due for recommended vaccination.",
+     "Vaccine administered; observed without reaction."),
+    ("R07.9", "Chest pain without a confirmed cardiac or pulmonary cause after initial evaluation.",
+     "Serial troponins and ECG; outpatient stress testing if negative."),
+    ("R06.02", "Shortness of breath under evaluation without a confirmed cause.",
+     "Chest X-ray, BNP, and continuous oxygen saturation monitoring."),
+    ("R51.9", "Headache without focal deficits or red-flag features.",
+     "Analgesics, hydration, and return precautions."),
+    ("Z79.4", "Requires ongoing insulin therapy for glycemic control.",
+     "Review insulin dosing and hypoglycemia precautions."),
+    ("Z87.891", "Former smoker; history relevant to cardiopulmonary risk.",
+     "Lung cancer screening eligibility reviewed."),
+    ("I48.91", "Irregularly irregular rhythm on ECG without discernible P waves.",
+     "Rate control; CHA2DS2-VASc assessed for anticoagulation."),
+]
+assert {r[0] for r in DX_REASONING} == {r.icd10_code for r in dx_df.select("icd10_code").collect()}
+dx_reasoning_df = spark.createDataFrame(DX_REASONING, ["icd10_code", "dx_rationale", "dx_plan"])
+
+# chief_complaint -> (HPI, exam, medical decision making)
+COMPLAINT_NOTES = {
+    "Routine laboratory collection": (
+        "Here for scheduled laboratory monitoring of chronic conditions; no new complaints.",
+        "Well-appearing, no acute distress. Venipuncture site clean without hematoma.",
+        "Monitoring labs drawn per chronic disease protocol; no acute issues requiring evaluation today.",
+    ),
+    "Chest pain": (
+        "Reports substernal chest pressure, non-radiating, worse with exertion and partially relieved by rest. Denies syncope.",
+        "Alert, mildly anxious. Regular rate and rhythm, no murmurs. Lungs clear bilaterally. Chest wall non-tender.",
+        "Differential includes acute coronary syndrome, stable angina, pulmonary embolism, GERD, and musculoskeletal pain. "
+        "ECG and serial troponin obtained to risk-stratify.",
+    ),
+    "Shortness of breath": (
+        "Reports progressive dyspnea on exertion with orthopnea and intermittent nonproductive cough. Notes increased leg swelling.",
+        "Mildly increased work of breathing. Bibasilar crackles. 1+ bilateral pitting edema to the shins.",
+        "Differential includes heart failure exacerbation, COPD exacerbation, pneumonia, and pulmonary embolism. "
+        "BNP, chest X-ray, and BMP ordered.",
+    ),
+    "Diabetes follow-up": (
+        "Presents for diabetes follow-up. Reports variable home glucose readings and occasional missed metformin doses. "
+        "Denies polyuria, vision change, or foot ulcers.",
+        "No acute distress. Monofilament sensation intact bilaterally. No foot lesions.",
+        "Glycemic control reviewed against home log and most recent HbA1c. Nephropathy and retinopathy screening addressed.",
+    ),
+    "Hypertension follow-up": (
+        "Presents for blood pressure follow-up. Reports adherence to antihypertensives with occasional elevated home readings. "
+        "Denies headache, chest pain, or vision change.",
+        "Regular rate and rhythm. No peripheral edema.",
+        "Blood pressure trend reviewed with home log. Assessed medication adherence, sodium intake, and secondary causes.",
+    ),
+    "Abdominal pain": (
+        "Reports epigastric pain, worse after meals, with nausea but no vomiting, hematemesis, or melena.",
+        "Soft, mildly tender in the epigastrium without rebound or guarding. Murphy sign negative.",
+        "Differential includes GERD, peptic ulcer disease, biliary colic, and pancreatitis. Lipase and hepatic panel ordered.",
+    ),
+    "Fever and cough": (
+        "Reports fever, productive cough, and malaise. Sick contacts at home.",
+        "Ill-appearing. Crackles in the right lower lung field. No accessory muscle use.",
+        "Differential includes community-acquired pneumonia, influenza, COVID-19, and acute bronchitis. "
+        "Respiratory viral panel and chest X-ray obtained; sepsis criteria reviewed.",
+    ),
+    "Medication refill": (
+        "Requests refill of chronic medications. Reports good tolerance without side effects.",
+        "No acute distress. Exam unchanged from prior visit.",
+        "Medication list reconciled; monitoring labs reviewed for safety of continued therapy.",
+    ),
+    "Fall with injury": (
+        "Reports a fall at home with left hip pain. Unclear whether head was struck; family notes brief confusion afterward.",
+        "Tenderness over the left lateral hip with pain on internal rotation. No focal neurologic deficits.",
+        "Evaluated for hip fracture, intracranial injury, and syncope as a cause of the fall. "
+        "Imaging ordered; fall-risk and medication review completed.",
+    ),
+    "Altered mental status": (
+        "Family reports new confusion and decreased oral intake.",
+        "Oriented to person only. No focal deficits. Mucous membranes dry.",
+        "Differential includes infection, metabolic derangement, medication effect, stroke, and dementia progression. "
+        "CBC, BMP, urinalysis, and glucose ordered.",
+    ),
+    "Back pain": (
+        "Reports low back pain after lifting, without radiation, saddle anesthesia, or bowel or bladder change.",
+        "Lumbar paraspinal tenderness. Straight-leg raise negative. Strength and reflexes symmetric.",
+        "No red-flag features for cauda equina, infection, or malignancy; imaging not indicated at this time.",
+    ),
+    "Wellness visit": (
+        "Presents for annual preventive visit. No acute concerns.",
+        "Well-appearing. Normal cardiopulmonary and abdominal exam.",
+        "Age-appropriate screening, immunizations, and cardiovascular risk reviewed.",
+    ),
+}
+NON_SYMPTOM_COMPLAINTS = ["Routine laboratory collection", "Medication refill", "Wellness visit", "Diabetes follow-up", "Hypertension follow-up"]
+
+# encounter_type -> (note_type, author_role, setting phrase)
+NOTE_TYPES = {
+    "Outpatient": ("Progress Note", "Primary Care Physician", "to clinic"),
+    "ED": ("ED Provider Note", "Emergency Physician", "to the emergency department"),
+    "Inpatient": ("History and Physical", "Hospitalist", "for hospital admission"),
+    "Lab Draw": ("Lab Visit Note", "Primary Care Physician", "for a scheduled lab draw"),
+    "Telehealth": ("Telehealth Visit Note", "Primary Care Physician", "via video visit"),
+    "Urgent Care": ("Urgent Care Note", "Urgent Care Physician", "to urgent care"),
+}
+
+
+def lit_map(d):
+    return F.create_map(*[F.lit(x) for kv in d.items() for x in kv])
+
+
+def note_hash(salt, n):
+    return F.pmod(F.hash(F.col("encounter_idx"), F.lit(salt)), F.lit(n))
+
+
+# Encounter diagnoses, primary first, each with the provider's reasoning and plan.
+dx_by_encounter = (
+    spark.table(f"{TARGET}.diagnoses")
+    .select("encounter_id", "diagnosis_type", "icd10_code", "diagnosis_description")
+    .join(dx_reasoning_df, "icd10_code", "left")
+    .groupBy("encounter_id")
+    .agg(
+        F.sort_array(
+            F.collect_set(
+                F.struct(
+                    F.when(F.col("diagnosis_type") == "Primary", 0).otherwise(1).alias("rank"),
+                    "diagnosis_description",
+                    "icd10_code",
+                    "dx_rationale",
+                    "dx_plan",
+                )
+            )
+        ).alias("dx")
+    )
+)
+
+cc = F.col("chief_complaint")
+enc_type = F.col("encounter_type")
+note_type = lit_map({k: v[0] for k, v in NOTE_TYPES.items()})[enc_type]
+author_role = lit_map({k: v[1] for k, v in NOTE_TYPES.items()})[enc_type]
+setting = lit_map({k: v[2] for k, v in NOTE_TYPES.items()})[enc_type]
+age = F.floor(F.months_between(F.col("encounter_date"), F.col("date_of_birth")) / 12).cast("int")
+in_outage = (
+    (F.col("encounter_facility") == "Frederick Health Hospital")
+    & (F.col("encounter_date") >= F.lit("2026-03-01").cast("timestamp"))
+    & (F.col("encounter_date") < F.lit("2026-03-22").cast("timestamp"))
+)
+
+hpi = F.concat_ws(
+    " ",
+    F.concat(
+        age.cast("string"),
+        F.lit("-year-old "),
+        F.when(F.col("sex") == "F", "female").otherwise("male"),
+        F.lit(" presents "),
+        setting,
+        F.lit("."),
+    ),
+    lit_map({k: v[0] for k, v in COMPLAINT_NOTES.items()})[cc],
+    F.when(
+        ~cc.isin(*NON_SYMPTOM_COMPLAINTS),
+        F.concat(
+            F.lit("Symptoms began "),
+            pick_from(F.col("encounter_idx"), ["1 day", "2 days", "3 days", "1 week", "2 weeks", "1 month"], "onset"),
+            F.lit(" ago."),
+        ),
+    ),
+    F.when(
+        F.col("is_high_utilizer"),
+        F.lit("Followed closely for multiple chronic conditions with several visits in the past year."),
+    ),
+)
+
+systolic = 112 + note_hash("sbp", 40) + F.when(F.col("is_high_utilizer"), 14).otherwise(0)
+heart_rate = F.when(cc.isin("Chest pain", "Fever and cough", "Fall with injury"), 88 + note_hash("hr", 30)).otherwise(
+    62 + note_hash("hr", 30)
+)
+temp_c = F.when(cc == "Fever and cough", 37.9 + note_hash("temp", 14) / 10).otherwise(36.4 + note_hash("temp", 9) / 10)
+spo2 = F.when(cc == "Shortness of breath", 88 + note_hash("spo2", 7)).otherwise(95 + note_hash("spo2", 5))
+vitals = F.when(
+    enc_type == "Telehealth",
+    F.lit("Vitals: not obtained (video visit); patient reports home readings within usual range."),
+).otherwise(
+    F.concat(
+        F.lit("Vitals: BP "),
+        systolic.cast("string"),
+        F.lit("/"),
+        (64 + note_hash("dbp", 26)).cast("string"),
+        F.lit(", HR "),
+        heart_rate.cast("string"),
+        F.lit(", RR "),
+        (12 + note_hash("rr", 8)).cast("string"),
+        F.lit(", Temp "),
+        F.format_number(temp_c, 1),
+        F.lit(" C, SpO2 "),
+        spo2.cast("string"),
+        F.lit("%."),
+    )
+)
+
+assessment = F.when(
+    F.col("dx").isNull(),
+    F.concat(cc, F.lit(" without a definitive diagnosis today; symptoms will be monitored.")),
+).otherwise(
+    F.concat_ws(
+        "\n",
+        F.transform(
+            "dx",
+            lambda x, i: F.concat(
+                (i + 1).cast("string"),
+                F.lit(". "),
+                x["diagnosis_description"],
+                F.lit(" ("),
+                x["icd10_code"],
+                F.lit("): "),
+                x["dx_rationale"],
+            ),
+        ),
+    )
+)
+
+plan = F.concat_ws(
+    " ",
+    F.when(F.col("dx").isNotNull(), F.concat_ws(" ", F.array_distinct(F.transform("dx", lambda x: x["dx_plan"])))),
+    F.when(
+        in_outage,
+        F.lit(
+            "Of note, specimens from this visit are affected by the Frederick Health courier disruption; HbA1c and BMP "
+            "results may be delayed 3-14 days. Will contact the patient with results and review before the next scheduled visit."
+        ),
+    ),
+    F.concat(F.lit("Disposition: "), F.col("discharge_disposition"), F.lit(".")),
+    F.concat(
+        F.lit("Follow up "),
+        F.when(F.col("is_high_utilizer"), F.lit("in 2 weeks")).otherwise(
+            pick_from(F.col("encounter_idx"), ["in 4 weeks", "in 3 months", "as needed"], "fu")
+        ),
+        F.lit("; return precautions reviewed."),
+    ),
+)
+
+note_text = F.concat_ws(
+    "\n",
+    F.concat(F.col("note_type"), F.lit(" - "), F.col("encounter_facility")),
+    F.concat(F.lit("Chief complaint: "), cc, F.lit(".")),
+    F.concat(F.lit("HPI: "), hpi),
+    vitals,
+    F.concat(F.lit("Exam: "), lit_map({k: v[1] for k, v in COMPLAINT_NOTES.items()})[cc]),
+    F.concat(F.lit("Medical decision making: "), lit_map({k: v[2] for k, v in COMPLAINT_NOTES.items()})[cc]),
+    F.concat(F.lit("Assessment:\n"), assessment),
+    F.concat(F.lit("Plan: "), plan),
+    F.concat(F.lit("Electronically signed by "), F.col("author"), F.lit(", "), F.col("author_role"), F.lit(".")),
+)
+
+clinical_notes = (
+    spark.table(f"{TARGET}.encounters")
+    .select(
+        "encounter_idx",
+        "encounter_id",
+        "patient_id",
+        "encounter_date",
+        "encounter_facility",
+        "encounter_type",
+        "chief_complaint",
+        "discharge_disposition",
+    )
+    .join(
+        spark.table(f"{TARGET}.patients").select("patient_id", "date_of_birth", "sex", "is_high_utilizer"),
+        "patient_id",
+        "inner",
+    )
+    .join(dx_by_encounter, "encounter_id", "left")
+    .withColumn("note_id", F.concat(F.lit("NOTE-"), F.lpad(F.col("encounter_idx").cast("string"), 8, "0")))
+    .withColumn(
+        "note_datetime",
+        F.timestamp_seconds(F.unix_timestamp("encounter_date") + 1200 + note_hash("note-lag", 13200)),
+    )
+    .withColumn("note_type", note_type)
+    .withColumn("author", pick_from(F.col("encounter_idx"), PROVIDERS, "note-author"))
+    .withColumn("author_role", author_role)
+    .withColumn("note_text", note_text)
+    .withColumn("embedding", F.col("note_text"))
+    .select(
+        "note_id",
+        "encounter_id",
+        "patient_id",
+        "note_datetime",
+        "note_type",
+        "author",
+        "author_role",
+        F.col("encounter_facility").alias("note_facility"),
+        "note_text",
+        "embedding",
+    )
+)
+
+(
+    clinical_notes.write.mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(f"{TARGET}.clinical_notes")
+)
+spark.sql(
+    f"""
+    ALTER TABLE {TARGET}.clinical_notes SET TBLPROPERTIES (
+      'delta.enableChangeDataFeed' = 'true',
+      'quality' = 'bronze'
+    )
+    """
+)
+spark.sql(f"ALTER TABLE {TARGET}.clinical_notes CLUSTER BY (patient_id, note_datetime)")
+print(f"clinical_notes: {spark.table(f'{TARGET}.clinical_notes').count():,}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Embedding vectors (1024-dim GTE)
 # MAGIC
 # MAGIC `embedding` text → `embedding_vector ARRAY<FLOAT>` via `ai_query` on the `embedding_endpoint` widget
 # MAGIC (default `databricks-gte-large-en`). Source text is highly templated, so each distinct string is embedded
 # MAGIC once into `embedding_vectors` and joined back onto every row of encounters, order_details, and diagnoses.
+# MAGIC `clinical_notes` text is mostly unique, so only a deterministic `note_embedding_pct` percent sample (default 1)
+# MAGIC is embedded; other notes keep `embedding` text with a null `embedding_vector`.
 # MAGIC Set `generate_vectors = false` to skip for smoke tests.
 
 # COMMAND ----------
@@ -1023,6 +1407,30 @@ if GENERATE_VECTORS:
             """
         )
         print(f"{table}: embedding_vector added")
+
+    # Notes are mostly unique, so embed a deterministic note_embedding_pct sample instead of the distinct-text lookup.
+    notes_except = (
+        " EXCEPT (embedding_vector)" if "embedding_vector" in spark.table(f"{TARGET}.clinical_notes").columns else ""
+    )
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {TARGET}.clinical_notes
+        CLUSTER BY (patient_id, note_datetime)
+        TBLPROPERTIES (
+          'delta.enableChangeDataFeed' = 'true',
+          'quality' = 'bronze'
+        )
+        AS
+        SELECT t.*{notes_except}, CAST(s.r.result AS ARRAY<FLOAT>) AS embedding_vector
+        FROM {TARGET}.clinical_notes t
+        LEFT JOIN (
+          SELECT note_id, ai_query('{EMBEDDING_ENDPOINT}', embedding, failOnError => false) AS r
+          FROM {TARGET}.clinical_notes
+          WHERE {NOTE_SAMPLE_PREDICATE}
+        ) s ON t.note_id = s.note_id
+        """
+    )
+    print(f"clinical_notes: embedding_vector added for {NOTE_EMBEDDING_PCT}% sample")
 else:
     print("generate_vectors = false; skipping embedding vectors")
 
@@ -1045,6 +1453,9 @@ spark.sql(
 )
 spark.sql(
     f"COMMENT ON TABLE {TARGET}.diagnoses IS 'Encounter diagnoses. embedding = diagnosis_description + clinical_note. FK: encounter_id, patient_id.'"
+)
+spark.sql(
+    f"COMMENT ON TABLE {TARGET}.clinical_notes IS 'Provider notes, one per encounter (HPI, vitals, exam, MDM, assessment reasoning, plan). embedding = note_text; embedding_vector on a note_embedding_pct sample. FK: encounter_id, patient_id.'"
 )
 
 spark.sql(
@@ -1093,9 +1504,19 @@ counts = spark.sql(
     UNION ALL SELECT 'orders', COUNT(*) FROM {TARGET}.orders
     UNION ALL SELECT 'order_details', COUNT(*) FROM {TARGET}.order_details
     UNION ALL SELECT 'diagnoses', COUNT(*) FROM {TARGET}.diagnoses
+    UNION ALL SELECT 'clinical_notes', COUNT(*) FROM {TARGET}.clinical_notes
     """
 )
 counts.show(truncate=False)
+
+print("clinical_notes vs encounters (expect both 0):")
+spark.sql(
+    f"""
+    SELECT
+      (SELECT COUNT(*) FROM {TARGET}.clinical_notes n LEFT ANTI JOIN {TARGET}.encounters e ON n.encounter_id = e.encounter_id) AS orphan_notes,
+      (SELECT COUNT(*) FROM {TARGET}.encounters e LEFT ANTI JOIN {TARGET}.clinical_notes n ON n.encounter_id = e.encounter_id) AS encounters_without_note
+    """
+).show()
 
 print("orphan encounters (should be 0):")
 spark.sql(
@@ -1163,5 +1584,18 @@ if GENERATE_VECTORS:
     spark.sql(
         f"SELECT COUNT(*) AS errors FROM {TARGET}.embedding_vectors WHERE error_message IS NOT NULL OR embedding_vector IS NULL"
     ).show()
+    print(f"clinical_notes embedding sample (expect pct_embedded ~ {NOTE_EMBEDDING_PCT}, sample_missing = 0, dim = 1024):")
+    spark.sql(
+        f"""
+        SELECT
+          COUNT(*) AS notes,
+          COUNT(embedding_vector) AS embedded,
+          ROUND(100.0 * COUNT(embedding_vector) / COUNT(*), 3) AS pct_embedded,
+          SUM(CASE WHEN {NOTE_SAMPLE_PREDICATE} AND embedding_vector IS NULL THEN 1 ELSE 0 END) AS sample_missing,
+          MIN(size(embedding_vector)) AS min_dim,
+          MAX(size(embedding_vector)) AS max_dim
+        FROM {TARGET}.clinical_notes
+        """
+    ).show(truncate=False)
 
 print("Done.")
