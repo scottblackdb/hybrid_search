@@ -23,8 +23,15 @@ const CANDIDATES = MAX_RESULTS;
 // table, so collecting N matches reads ~N/1.5 heap blocks (~0.18 ms each from Lakebase storage): 20000 took ~2 s.
 // Terms with fewer matches than the cap are ranked exactly; for more common terms the top results come from the first
 // N matches found. Lower is faster and more approximate.
+const DEFAULT_MATCH_CAP = 5000;
 const parsedCap = Number(process.env.KEYWORD_MATCH_CAP);
-const MATCH_CAP = Number.isInteger(parsedCap) && parsedCap >= CANDIDATES ? parsedCap : 5000;
+const capIsValid = Number.isInteger(parsedCap) && parsedCap >= CANDIDATES;
+if (process.env.KEYWORD_MATCH_CAP !== undefined && !capIsValid) {
+  console.warn(
+    `[search] Ignoring KEYWORD_MATCH_CAP=${process.env.KEYWORD_MATCH_CAP}: it must be an integer >= ${CANDIDATES}; using ${DEFAULT_MATCH_CAP}`
+  );
+}
+const MATCH_CAP = capIsValid ? parsedCap : DEFAULT_MATCH_CAP;
 
 /**
  * Builds the hybrid query. Parameters are numbered in order: query text (not in semantic mode), query embedding
@@ -201,7 +208,7 @@ ${select}`;
 /** Session settings applied (SET LOCAL) before the search so filtered HNSW scans still return enough rows. */
 export const SESSION_SETTINGS = [
   "SET LOCAL work_mem = '64MB'", // keeps the keyword bitmap exact instead of lossy
-  'SET LOCAL hnsw.ef_search = 200', // >= candidates per leg
+  `SET LOCAL hnsw.ef_search = ${Math.min(CANDIDATES, 1000)}`, // tied to candidates per leg; pgvector maximum is 1000
   'SET LOCAL hnsw.iterative_scan = relaxed_order',
   // Default is 20000; a source filter that matches few nearest neighbours otherwise returns 0 rows.
   'SET LOCAL hnsw.max_scan_tuples = 100000',

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { getDocument, search, type DocumentDetail, type SearchMode, type SearchResponse } from './api';
 import { DetailPane } from './components/DetailPane';
 import { Header } from './components/Header';
@@ -19,35 +19,48 @@ export default function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  // Request counters: only the latest search / record request may update state, so a slow earlier response
+  // cannot overwrite a newer one or resurrect a record after a new search has cleared the panes.
+  const searchSeq = useRef(0);
+  const detailSeq = useRef(0);
+
   const select = useCallback(async (docId: string) => {
+    const seq = ++detailSeq.current;
     setSelectedId(docId);
     setLoadingDetail(true);
     setDetailError(null);
     try {
-      setDetail(await getDocument(docId));
+      const result = await getDocument(docId);
+      if (seq === detailSeq.current) setDetail(result);
     } catch (err) {
-      setDetail(null);
-      setDetailError((err as Error).message);
+      if (seq === detailSeq.current) {
+        setDetail(null);
+        setDetailError((err as Error).message);
+      }
     } finally {
-      setLoadingDetail(false);
+      if (seq === detailSeq.current) setLoadingDetail(false);
     }
   }, []);
 
   const runSearch = useCallback(async () => {
     if (!query.trim()) return;
+    const seq = ++searchSeq.current;
+    detailSeq.current++; // abandon any record request still in flight
     // Clear the previous search first so stale results, record and SQL are not shown while the new search runs.
     setResponse(null);
     setSelectedId(null);
     setDetail(null);
     setDetailError(null);
+    setLoadingDetail(false);
     setSearchError(null);
     setSearching(true);
     try {
-      setResponse(await search(query.trim(), mode, sources));
+      const result = await search(query.trim(), mode, sources);
+      if (seq === searchSeq.current) setResponse(result);
     } catch (err) {
-      setSearchError((err as Error).message);
+      if (seq === searchSeq.current) setSearchError((err as Error).message);
     } finally {
-      setSearching(false);
+      if (seq === searchSeq.current) setSearching(false);
     }
   }, [query, mode, sources]);
 
