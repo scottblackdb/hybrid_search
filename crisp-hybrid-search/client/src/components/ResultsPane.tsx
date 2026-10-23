@@ -1,4 +1,4 @@
-import { useCallback, useMemo, type KeyboardEvent } from 'react';
+import type { KeyboardEvent } from 'react';
 import { Layers, User, AlertCircle, Loader2 } from 'lucide-react';
 import { formatDate, sourceLabel, type SearchResponse } from '../api';
 
@@ -11,27 +11,18 @@ interface Props {
 }
 
 export function ResultsPane({ response, searching, error, selectedId, onSelect }: Props) {
-  const results = useMemo(() => response?.results ?? [], [response]);
+  const results = response?.results ?? [];
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLUListElement>) => {
-      if (!results.length) return;
-
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        const currentIndex = results.findIndex((r) => r.doc_id === selectedId);
-
-        if (e.key === 'ArrowDown') {
-          const nextIndex = currentIndex < results.length - 1 ? currentIndex + 1 : 0;
-          onSelect(results[nextIndex].doc_id);
-        } else if (e.key === 'ArrowUp') {
-          const prevIndex = currentIndex > 0 ? currentIndex - 1 : results.length - 1;
-          onSelect(results[prevIndex].doc_id);
-        }
-      }
-    },
-    [results, selectedId, onSelect]
-  );
+  // Arrow keys move the selection, wrapping at either end.
+  const handleKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
+    const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (!step || !results.length) return;
+    e.preventDefault();
+    const n = results.length;
+    const i = results.findIndex((r) => r.doc_id === selectedId);
+    const next = i === -1 ? (step > 0 ? 0 : n - 1) : (i + step + n) % n;
+    onSelect(results[next].doc_id);
+  };
 
   return (
     <aside className="pane results" aria-label="Search results">
@@ -40,7 +31,7 @@ export function ResultsPane({ response, searching, error, selectedId, onSelect }
           <Layers size={14} />
           <span>Results</span>
         </div>
-        {response ? <span className="count-badge">{response.results.length}</span> : null}
+        {response && <span className="count-badge">{results.length}</span>}
       </div>
 
       <div className="pane-body">
@@ -61,7 +52,7 @@ export function ResultsPane({ response, searching, error, selectedId, onSelect }
             <span>Searching records…</span>
           </div>
         )}
-        {response && response.results.length === 0 && (
+        {response && results.length === 0 && (
           <div className="notice">
             <p>No matching clinical records found.</p>
           </div>
@@ -96,7 +87,7 @@ export function ResultsPane({ response, searching, error, selectedId, onSelect }
                   <div className="result-patient">
                     <User size={12} strokeWidth={2} />
                     <span>{hit.full_name ?? hit.patient_id}</span>
-                    {hit.facility ? <span>· {hit.facility}</span> : ''}
+                    {hit.facility && <span>· {hit.facility}</span>}
                   </div>
 
                   <div className="result-snippet">{hit.snippet}</div>

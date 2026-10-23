@@ -52,26 +52,23 @@ export function buildSearchQuery(
     displayParams.push(display);
     return `$${params.length}`;
   };
-  const txt = mode === 'semantic' ? '' : add(q, `'${q.replace(/'/g, "''")}'`);
-  const vec =
-    mode === 'keyword'
-      ? ''
-      : add(
-          `[${vector.join(',')}]`,
-          `'[${vector
-            .slice(0, 3)
-            .map((v) => v.toFixed(4))
-            .join(', ')}, … ${vector.length} dims]'`
-        );
+  const useKeyword = mode !== 'semantic';
+  const useSemantic = mode !== 'keyword';
+  const txt = useKeyword ? add(q, `'${q.replace(/'/g, "''")}'`) : '';
+  const vec = !useSemantic
+    ? ''
+    : add(
+        `[${vector.join(',')}]`,
+        `'[${vector
+          .slice(0, 3)
+          .map((v) => v.toFixed(4))
+          .join(', ')}, … ${vector.length} dims]'`
+      );
   const lim = add(limit, String(limit));
 
-  const where: string[] = [];
-  if (filters.sources.length > 0) {
-    const sourcesP = add(filters.sources, `ARRAY[${filters.sources.map((s) => `'${s}'`).join(', ')}]`);
-    where.push(`source_table = ANY(${sourcesP})`);
-  }
-  const and = where.length ? `AND ${where.join(' AND ')}` : '';
-  const whereOnly = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const sourceFilter = filters.sources.length
+    ? `source_table = ANY(${add(filters.sources, `ARRAY[${filters.sources.map((s) => `'${s}'`).join(', ')}]`)})`
+    : '';
 
   // The exact-code/ID and trigram-name conditions only help short queries. Adding them to a long clinical phrase
   // OR-s a wide trigram index scan into every search and keeps the planner from using the full-text index alone.
@@ -106,7 +103,7 @@ export function buildSearchQuery(
       SELECT doc_id, content_tsv, icd10_code, loinc_code, patient_id, full_name
       FROM ${TABLE}
       WHERE (${matches.join('\n             OR ')})
-            ${and}
+            ${sourceFilter && `AND ${sourceFilter}`}
       LIMIT ${MATCH_CAP}
     ) m
     ORDER BY score DESC NULLS LAST
@@ -119,7 +116,7 @@ export function buildSearchQuery(
          row_number() OVER (ORDER BY embedding <=> ${vec}::vector) AS rank,
          1 - (embedding <=> ${vec}::vector) AS score
   FROM ${TABLE}
-  ${whereOnly}
+  ${sourceFilter && `WHERE ${sourceFilter}`}
   ORDER BY embedding <=> ${vec}::vector
   LIMIT ${CANDIDATES}
 )`;
@@ -134,62 +131,10 @@ JOIN ${TABLE} d USING (doc_id)
 ORDER BY f.rrf DESC
 LIMIT ${lim}`;
 
-  let text: string;
-  const steps: BuiltQuery['steps'] =
-    mode === 'keyword'
-      ? []
-      : [
-          {
-            name: 'Embed query',
-            description: `The query text is sent to databricks-gte-large-en to get a 1024-dim vector (${vec}).`,
-          },
-        ];
-  if (filters.sources.length > 0) {
-    steps.push({
-      name: 'Filter',
-      description: `Restrict to source_table in (${filters.sources.join(', ')}) inside each leg, before ranking.`,
-    });
-  }
-
-  if (mode === 'keyword') {
-    steps.push({
-      name: 'Keyword search',
-      description: `Top ${CANDIDATES} by ${keywordWhat.join(' + ')}, ranking at most ${MATCH_CAP} matches.`,
-    });
-    text = `WITH ${keywordCte},
-fused AS (
-  SELECT doc_id, 1.0 / (${RRF_K} + rank) AS rrf, rank AS keyword_rank, NULL::bigint AS semantic_rank,
-         score AS keyword_score, NULL::float8 AS semantic_score
-  FROM keyword
-)
-${select}`;
-  } else if (mode === 'semantic') {
-    steps.push({
-      name: 'Semantic search',
-      description: `Top ${CANDIDATES} nearest neighbours by cosine distance (HNSW).`,
-    });
-    text = `WITH ${semanticCte},
-fused AS (
-  SELECT doc_id, 1.0 / (${RRF_K} + rank) AS rrf, NULL::bigint AS keyword_rank, rank AS semantic_rank,
-         NULL::float8 AS keyword_score, score AS semantic_score
-  FROM semantic
-)
-${select}`;
-  } else {
-    steps.push(
-      {
-        name: 'Keyword search',
-        description: `Top ${CANDIDATES} by ${keywordWhat.join(' + ')}, ranking at most ${MATCH_CAP} matches.`,
-      },
-      { name: 'Semantic search', description: `Top ${CANDIDATES} nearest neighbours by cosine distance (HNSW).` },
-      {
-        name: 'Fuse',
-        description: `Reciprocal rank fusion: rrf = 1/(${RRF_K}+keyword_rank) + 1/(${RRF_K}+semantic_rank). A document found by both legs rises to the top.`,
-      }
-    );
-    text = `WITH ${keywordCte},
-${semanticCte},
-fused AS (
+  // With one leg, the fused CTE passes it through and leaves the other leg's columns NULL.
+  const fusedCte =
+    mode === 'hybrid'
+      ? `fused AS (
   -- Reciprocal rank fusion
   SELECT coalesce(k.doc_id, s.doc_id) AS doc_id,
          coalesce(1.0 / (${RRF_K} + k.rank), 0) + coalesce(1.0 / (${RRF_K} + s.rank), 0) AS rrf,
@@ -197,8 +142,45 @@ fused AS (
          k.score AS keyword_score, s.score AS semantic_score
   FROM keyword k
   FULL JOIN semantic s USING (doc_id)
-)
-${select}`;
+)`
+      : `fused AS (
+  SELECT doc_id, 1.0 / (${RRF_K} + rank) AS rrf, ${useKeyword ? 'rank' : 'NULL::bigint'} AS keyword_rank, ${useSemantic ? 'rank' : 'NULL::bigint'} AS semantic_rank,
+         ${useKeyword ? 'score' : 'NULL::float8'} AS keyword_score, ${useSemantic ? 'score' : 'NULL::float8'} AS semantic_score
+  FROM ${mode}
+)`;
+  const ctes = [useKeyword && keywordCte, useSemantic && semanticCte, fusedCte].filter(Boolean);
+  const text = `WITH ${ctes.join(',\n')}\n${select}`;
+
+  const steps: BuiltQuery['steps'] = [];
+  if (useSemantic) {
+    steps.push({
+      name: 'Embed query',
+      description: `The query text is sent to databricks-gte-large-en to get a 1024-dim vector (${vec}).`,
+    });
+  }
+  if (sourceFilter) {
+    steps.push({
+      name: 'Filter',
+      description: `Restrict to source_table in (${filters.sources.join(', ')}) inside each leg, before ranking.`,
+    });
+  }
+  if (useKeyword) {
+    steps.push({
+      name: 'Keyword search',
+      description: `Top ${CANDIDATES} by ${keywordWhat.join(' + ')}, ranking at most ${MATCH_CAP} matches.`,
+    });
+  }
+  if (useSemantic) {
+    steps.push({
+      name: 'Semantic search',
+      description: `Top ${CANDIDATES} nearest neighbours by cosine distance (HNSW).`,
+    });
+  }
+  if (mode === 'hybrid') {
+    steps.push({
+      name: 'Fuse',
+      description: `Reciprocal rank fusion: rrf = 1/(${RRF_K}+keyword_rank) + 1/(${RRF_K}+semantic_rank). A document found by both legs rises to the top.`,
+    });
   }
   steps.push({ name: 'Join', description: 'Fetch display columns for the fused doc_ids and return the top results.' });
 

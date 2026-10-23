@@ -18,6 +18,84 @@ function Field({ label, value }: { label: string; value: string | null | undefin
   );
 }
 
+function RecordView({ detail, onSelect }: { detail: DocumentDetail; onSelect: (docId: string) => void }) {
+  const { document: doc, related } = detail;
+  return (
+    <article>
+      <div className="detail-header-card">
+        <div className="tags">
+          <span className="tag">{sourceLabel(doc.source_table)}</span>
+          {doc.doc_type && <span className="tag">{doc.doc_type}</span>}
+          {doc.result_flag && (
+            <span className={`tag flag flag-${doc.result_flag.toLowerCase()}`}>{doc.result_flag}</span>
+          )}
+        </div>
+        <h1>{doc.title ?? doc.doc_id}</h1>
+        <div className="meta-row">
+          <span>{formatDate(doc.event_at, true)}</span>
+          {doc.facility && <span>· {doc.facility}</span>}
+          {doc.author && <span>· {doc.author}</span>}
+        </div>
+      </div>
+
+      <section className="card">
+        <div className="card-title">
+          <FileText size={13} />
+          <span>Clinical Record</span>
+        </div>
+        {doc.content && <div className="content-block">{doc.content}</div>}
+        <dl className="fields">
+          <Field label="Document ID" value={doc.doc_id} />
+          <Field label="Encounter" value={doc.encounter_id} />
+          <Field label="ICD-10" value={doc.icd10_code} />
+          <Field label="Diagnosis Family" value={doc.dx_family} />
+          <Field label="LOINC" value={doc.loinc_code} />
+          <Field label="Order Status" value={doc.order_status} />
+        </dl>
+      </section>
+
+      <section className="card">
+        <div className="card-title">
+          <User size={13} />
+          <span>Patient Information</span>
+        </div>
+        <dl className="fields">
+          <Field label="Name" value={doc.full_name} />
+          <Field label="Patient ID" value={doc.patient_id} />
+          <Field label="Date of Birth" value={formatDate(doc.date_of_birth)} />
+          <Field label="Sex" value={doc.sex} />
+          <Field label="ZIP Code" value={doc.zip_code} />
+          <Field label="Insurance Plan" value={doc.insurance_plan} />
+          <Field label="Primary Facility" value={doc.primary_facility} />
+          <Field label="Last Visited" value={formatDate(doc.last_visited)} />
+          <Field label="Next Scheduled" value={formatDate(doc.next_scheduled_visit, true)} />
+          <Field label="High Utilizer" value={doc.is_high_utilizer ? 'Yes' : 'No'} />
+        </dl>
+      </section>
+
+      {related.length > 0 && (
+        <section className="card">
+          <div className="card-title">
+            <History size={13} />
+            <span>Other Records For This Patient</span>
+          </div>
+          <ul className="related-list">
+            {related.map((r) => (
+              <li key={r.doc_id}>
+                <button type="button" className="related-btn" onClick={() => onSelect(r.doc_id)}>
+                  <span className="tag">{sourceLabel(r.source_table)}</span>
+                  <span className="related-title">{r.title ?? r.doc_type ?? r.doc_id}</span>
+                  <span className="result-date">{formatDate(r.event_at)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </article>
+  );
+}
+
 export function DetailPane({ detail, loading, error, hasResults, onSelect }: Props) {
   return (
     <main className="pane detail" aria-label="Selected record">
@@ -46,82 +124,7 @@ export function DetailPane({ detail, loading, error, hasResults, onSelect }: Pro
           </p>
         </div>
       )}
-      {detail && !loading && (
-        <article>
-          <div className="detail-header-card">
-            <div className="tags">
-              <span className="tag">{sourceLabel(detail.document.source_table)}</span>
-              {detail.document.doc_type && <span className="tag">{detail.document.doc_type}</span>}
-              {detail.document.result_flag && (
-                <span className={`tag flag flag-${detail.document.result_flag.toLowerCase()}`}>
-                  {detail.document.result_flag}
-                </span>
-              )}
-            </div>
-            <h1>{detail.document.title ?? detail.document.doc_id}</h1>
-            <div className="meta-row">
-              <span>{formatDate(detail.document.event_at, true)}</span>
-              {detail.document.facility && <span>· {detail.document.facility}</span>}
-              {detail.document.author && <span>· {detail.document.author}</span>}
-            </div>
-          </div>
-
-          <section className="card">
-            <div className="card-title">
-              <FileText size={13} />
-              <span>Clinical Record</span>
-            </div>
-            {detail.document.content && <div className="content-block">{detail.document.content}</div>}
-            <dl className="fields">
-              <Field label="Document ID" value={detail.document.doc_id} />
-              <Field label="Encounter" value={detail.document.encounter_id} />
-              <Field label="ICD-10" value={detail.document.icd10_code} />
-              <Field label="Diagnosis Family" value={detail.document.dx_family} />
-              <Field label="LOINC" value={detail.document.loinc_code} />
-              <Field label="Order Status" value={detail.document.order_status} />
-            </dl>
-          </section>
-
-          <section className="card">
-            <div className="card-title">
-              <User size={13} />
-              <span>Patient Information</span>
-            </div>
-            <dl className="fields">
-              <Field label="Name" value={detail.document.full_name} />
-              <Field label="Patient ID" value={detail.document.patient_id} />
-              <Field label="Date of Birth" value={formatDate(detail.document.date_of_birth)} />
-              <Field label="Sex" value={detail.document.sex} />
-              <Field label="ZIP Code" value={detail.document.zip_code} />
-              <Field label="Insurance Plan" value={detail.document.insurance_plan} />
-              <Field label="Primary Facility" value={detail.document.primary_facility} />
-              <Field label="Last Visited" value={formatDate(detail.document.last_visited)} />
-              <Field label="Next Scheduled" value={formatDate(detail.document.next_scheduled_visit, true)} />
-              <Field label="High Utilizer" value={detail.document.is_high_utilizer ? 'Yes' : 'No'} />
-            </dl>
-          </section>
-
-          {detail.related.length > 0 && (
-            <section className="card">
-              <div className="card-title">
-                <History size={13} />
-                <span>Other Records For This Patient</span>
-              </div>
-              <ul className="related-list">
-                {detail.related.map((r) => (
-                  <li key={r.doc_id}>
-                    <button type="button" className="related-btn" onClick={() => onSelect(r.doc_id)}>
-                      <span className="tag">{sourceLabel(r.source_table)}</span>
-                      <span className="related-title">{r.title ?? r.doc_type ?? r.doc_id}</span>
-                      <span className="result-date">{formatDate(r.event_at)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-        </article>
-      )}
+      {detail && !loading && <RecordView detail={detail} onSelect={onSelect} />}
     </main>
   );
 }

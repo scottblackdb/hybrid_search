@@ -38,8 +38,6 @@ notebooks/
 crisp-hybrid-search/                    # Databricks App (AppKit: React client + Express server) - see "Search app" below
 ```
 
-Note: `00_`, `01_`, `02_` and `search_documents.py` also exist at the repo root (older copies); `notebooks/` is the canonical location named above.
-
 Workspace copy (already imported):
 
 `/Users/scott.black@databricks.com/hybrid_search/01_generate_bronze_clinical_data`

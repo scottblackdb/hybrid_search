@@ -2,14 +2,7 @@ import { WorkspaceClient } from '@databricks/sdk-experimental';
 import type { Application } from 'express';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import {
-  buildSearchQuery,
-  DETAIL_SQL,
-  MAX_RESULTS,
-  RELATED_SQL,
-  SESSION_SETTINGS,
-  type SearchMode,
-} from './search-sql';
+import { buildSearchQuery, DETAIL_SQL, MAX_RESULTS, RELATED_SQL, SESSION_SETTINGS } from './search-sql';
 
 interface AppKitWithLakebase {
   lakebase: {
@@ -57,10 +50,10 @@ export function setupSearchRoutes(appkit: AppKitWithLakebase) {
       try {
         const t0 = performance.now();
         // Keyword mode needs no embedding, so skip the endpoint call.
-        const vector = mode === 'keyword' ? new Array<number>(1024).fill(0) : await embed(query);
+        const vector = mode === 'keyword' ? [] : await embed(query);
         const embedMs = performance.now() - t0;
 
-        const built = buildSearchQuery(query, vector, mode as SearchMode, limit, { sources });
+        const built = buildSearchQuery(query, vector, mode, limit, { sources });
         const client = await appkit.lakebase.pool.connect();
         const t1 = performance.now();
         let rows: Record<string, unknown>[];

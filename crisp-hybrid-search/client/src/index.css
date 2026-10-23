@@ -670,6 +670,53 @@ input, button, select, textarea {
 .sql .pane-body {
   padding: 16px;
 }
+.sql .pane-body[hidden] {
+  display: none;
+}
+
+.pane-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--sql-muted);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.pane-toggle:hover {
+  color: #f8fafc;
+  background: var(--sql-panel-bg);
+  border-color: var(--sql-border-subtle);
+}
+.pane-toggle:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+/* Wide layout: the collapsed SQL pane shrinks to a narrow rail with a vertical title. */
+@media (min-width: 1181px) {
+  .app.sql-collapsed {
+    grid-template-columns: 370px minmax(0, 1fr) 44px;
+  }
+  .sql.collapsed .pane-title {
+    flex: 1;
+    height: auto;
+    padding: 8px 0;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 14px;
+    border-bottom: none;
+  }
+  .sql.collapsed .pane-toggle {
+    order: -1;
+  }
+  .sql.collapsed .pane-title-left {
+    writing-mode: vertical-rl;
+  }
+}
 
 .metric-strip {
   display: grid;

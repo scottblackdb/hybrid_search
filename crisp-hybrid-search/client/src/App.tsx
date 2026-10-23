@@ -5,6 +5,8 @@ import { Header } from './components/Header';
 import { ResultsPane } from './components/ResultsPane';
 import { SqlPane } from './components/SqlPane';
 
+const SQL_COLLAPSED_KEY = 'crisp.sqlPaneCollapsed';
+
 export default function App() {
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<SearchMode>('hybrid');
@@ -18,6 +20,12 @@ export default function App() {
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+
+  const [sqlCollapsed, setSqlCollapsed] = useState(() => localStorage.getItem(SQL_COLLAPSED_KEY) === 'true');
+  const toggleSql = () => {
+    setSqlCollapsed(!sqlCollapsed);
+    localStorage.setItem(SQL_COLLAPSED_KEY, String(!sqlCollapsed));
+  };
 
   // Request counters: only the latest search / record request may update state, so a slow earlier response
   // cannot overwrite a newer one or resurrect a record after a new search has cleared the panes.
@@ -65,7 +73,7 @@ export default function App() {
   }, [query, mode, sources]);
 
   return (
-    <div className="app">
+    <div className={sqlCollapsed ? 'app sql-collapsed' : 'app'}>
       <Header
         query={query}
         onQuery={setQuery}
@@ -90,7 +98,13 @@ export default function App() {
         hasResults={response !== null}
         onSelect={(id) => void select(id)}
       />
-      <SqlPane response={response} detail={detail} searching={searching} />
+      <SqlPane
+        response={response}
+        detail={detail}
+        searching={searching}
+        collapsed={sqlCollapsed}
+        onToggle={toggleSql}
+      />
     </div>
   );
 }

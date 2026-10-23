@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react';
-import { Terminal, Copy, Check } from 'lucide-react';
+import { Terminal, Copy, Check, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { formatLatency, type DocumentDetail, type SearchResponse } from '../api';
 
 const KEYWORDS =
@@ -57,17 +57,8 @@ function CodeBlock({ code }: { code: string }) {
   return (
     <div className="code-wrapper">
       <button type="button" className="copy-btn" onClick={() => void handleCopy()} title="Copy to clipboard">
-        {copied ? (
-          <>
-            <Check size={11} />
-            <span>Copied</span>
-          </>
-        ) : (
-          <>
-            <Copy size={11} />
-            <span>Copy</span>
-          </>
-        )}
+        {copied ? <Check size={11} /> : <Copy size={11} />}
+        <span>{copied ? 'Copied' : 'Copy'}</span>
       </button>
       <pre className="sql-code">{highlight(code)}</pre>
     </div>
@@ -78,19 +69,31 @@ interface Props {
   response: SearchResponse | null;
   detail: DocumentDetail | null;
   searching: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
 }
 
-export function SqlPane({ response, detail, searching }: Props) {
+export function SqlPane({ response, detail, searching, collapsed, onToggle }: Props) {
   return (
-    <aside className="pane sql" aria-label="Search logic">
+    <aside className={collapsed ? 'pane sql collapsed' : 'pane sql'} aria-label="Search logic">
       <div className="pane-title">
         <div className="pane-title-left">
           <Terminal size={14} />
           <span>Execution & SQL Logic</span>
         </div>
+        <button
+          type="button"
+          className="pane-toggle"
+          onClick={onToggle}
+          aria-expanded={!collapsed}
+          aria-controls="sql-pane-body"
+          title={collapsed ? 'Expand SQL pane' : 'Collapse SQL pane'}
+        >
+          {collapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />}
+        </button>
       </div>
 
-      <div className="pane-body">
+      <div className="pane-body" id="sql-pane-body" hidden={collapsed}>
         {!response && !searching && (
           <div className="notice dark">
             <p>Executed SQL, session configuration, and RRF fusion plans appear here upon running a search.</p>
@@ -151,7 +154,7 @@ export function SqlPane({ response, detail, searching }: Props) {
           </>
         )}
 
-        {detail && detail.sql && detail.sql.length > 0 && (
+        {detail && (
           <>
             <div className="section-label" style={{ marginTop: 24 }}>
               Selected Record Queries
