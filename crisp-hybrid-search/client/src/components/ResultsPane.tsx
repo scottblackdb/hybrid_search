@@ -1,3 +1,4 @@
+import { useCallback, useMemo, type KeyboardEvent } from 'react';
 import { Layers, User, AlertCircle, Loader2 } from 'lucide-react';
 import { formatDate, sourceLabel, type SearchResponse } from '../api';
 
@@ -10,6 +11,28 @@ interface Props {
 }
 
 export function ResultsPane({ response, searching, error, selectedId, onSelect }: Props) {
+  const results = useMemo(() => response?.results ?? [], [response]);
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLUListElement>) => {
+      if (!results.length) return;
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const currentIndex = results.findIndex((r) => r.doc_id === selectedId);
+
+        if (e.key === 'ArrowDown') {
+          const nextIndex = currentIndex < results.length - 1 ? currentIndex + 1 : 0;
+          onSelect(results[nextIndex].doc_id);
+        } else if (e.key === 'ArrowUp') {
+          const prevIndex = currentIndex > 0 ? currentIndex - 1 : results.length - 1;
+          onSelect(results[prevIndex].doc_id);
+        }
+      }
+    },
+    [results, selectedId, onSelect]
+  );
+
   return (
     <aside className="pane results" aria-label="Search results">
       <div className="pane-title">
@@ -44,11 +67,17 @@ export function ResultsPane({ response, searching, error, selectedId, onSelect }
           </div>
         )}
 
-        <ul className="result-list">
-          {response?.results.map((hit) => {
+        <ul
+          className="result-list"
+          role="listbox"
+          aria-label="Clinical search results"
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+        >
+          {results.map((hit) => {
             const isSelected = hit.doc_id === selectedId;
             return (
-              <li key={hit.doc_id}>
+              <li key={hit.doc_id} role="option" aria-selected={isSelected}>
                 <button
                   type="button"
                   className={isSelected ? 'result active' : 'result'}

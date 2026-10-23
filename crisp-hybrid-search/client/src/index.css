@@ -185,7 +185,7 @@ input, button, select, textarea {
   color: var(--text-primary);
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: 0; /* Square text box per CRISP brand requirement */
   transition: all 0.15s ease-in-out;
 }
 .search-input:focus {

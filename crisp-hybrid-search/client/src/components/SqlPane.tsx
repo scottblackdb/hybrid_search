@@ -6,20 +6,21 @@ const KEYWORDS =
   /\b(WITH|AS|SELECT|FROM|WHERE|AND|OR|ORDER BY|OVER|LIMIT|JOIN|FULL JOIN|USING|ON|ANY|ARRAY|NULL|DESC|IS|SET LOCAL|BEGIN|COMMIT)\b/g;
 
 function highlight(sql: string) {
-  return sql.split('\n').map((line, i) => {
+  /* eslint-disable react/no-array-index-key -- SQL code tokenization creates static read-only syntax fragments where token index is safe */
+  return sql.split('\n').map((line, lineIndex) => {
     const idx = line.indexOf('--');
     const code = idx >= 0 ? line.slice(0, idx) : line;
     const comment = idx >= 0 ? line.slice(idx) : '';
-    const parts = code.split(KEYWORDS).map((part, j) =>
-      j % 2 === 1 ? (
-        <span key={j} className="sql-kw">
+    const parts = code.split(KEYWORDS).map((part, partIndex) =>
+      partIndex % 2 === 1 ? (
+        <span key={`kw-${partIndex}`} className="sql-kw">
           {part}
         </span>
       ) : (
-        <Fragment key={j}>
-          {part.split(/(\$\d+)/).map((p, k) =>
+        <Fragment key={`p-${partIndex}`}>
+          {part.split(/(\$\d+)/).map((p, pIndex) =>
             /^\$\d+$/.test(p) ? (
-              <span key={k} className="sql-param">
+              <span key={`param-${pIndex}`} className="sql-param">
                 {p}
               </span>
             ) : (
@@ -30,13 +31,14 @@ function highlight(sql: string) {
       )
     );
     return (
-      <div key={i} className="sql-line">
+      <div key={`line-${lineIndex}`} className="sql-line">
         {parts}
         {comment && <span className="sql-comment">{comment}</span>}
         {line === '' && '\u00a0'}
       </div>
     );
   });
+  /* eslint-enable react/no-array-index-key */
 }
 
 function CodeBlock({ code }: { code: string }) {
@@ -140,7 +142,7 @@ export function SqlPane({ response, detail, searching }: Props) {
             <div className="section-label">Bound Parameters</div>
             <dl className="params-grid">
               {response.params.map((p, i) => (
-                <Fragment key={i}>
+                <Fragment key={`param-${i + 1}-${String(p)}`}>
                   <dt>${i + 1}</dt>
                   <dd>{p}</dd>
                 </Fragment>
@@ -154,8 +156,8 @@ export function SqlPane({ response, detail, searching }: Props) {
             <div className="section-label" style={{ marginTop: 24 }}>
               Selected Record Queries
             </div>
-            {detail.sql.map((q, i) => (
-              <CodeBlock key={i} code={q} />
+            {detail.sql.map((q) => (
+              <CodeBlock key={q} code={q} />
             ))}
           </>
         )}
